@@ -1,3 +1,3 @@
-module daployi-plugin-sdk-go
+module github.com/Daployi/daployi-plugin-sdk-go
 
 go 1.26
