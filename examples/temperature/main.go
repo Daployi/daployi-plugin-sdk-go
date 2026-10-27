@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	plugin "daployi-plugin-sdk-go"
 	"encoding/json"
+	plugin "github.com/Daployi/daployi-plugin-sdk-go"
 	"log"
 	"os"
 	"time"

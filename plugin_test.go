@@ -57,12 +57,20 @@ func TestAllMethodsAndShutdown(t *testing.T) {
 		if f.Method != method {
 			t.Fatalf("method %s", f.Method)
 		}
+		if method == "ready" {
+			var capabilities struct {
+				PublishFilterVersion int `json:"publishFilterVersion"`
+			}
+			if err := json.Unmarshal(f.Params, &capabilities); err != nil || capabilities.PublishFilterVersion != 1 {
+				t.Fatal("missing filtered-receipt capability")
+			}
+		}
 		var data data
 		_ = json.Unmarshal(f.Params, &data)
 		var res any = map[string]any{}
 		switch method {
 		case "publishData":
-			res = Receipt{[]string{data.Records[0].ID}}
+			res = Receipt{AcceptedIDs: []string{data.Records[0].ID}}
 		case "reviewData":
 			res = ReviewResult{2}
 		case "pushLiveData":

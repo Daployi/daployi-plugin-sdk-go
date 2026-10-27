@@ -23,8 +23,12 @@ const ProtocolVersion = 1
 const MaxFrameBytes = 1024 * 1024
 const MaxRecords = 100
 
+// PublishFilterVersion advertises support for separately acknowledged skipped records.
+const PublishFilterVersion = 1
+
 // Record IDs must remain unchanged when retrying PublishData after an uncertain
-// outcome. A successful call means agent disk acceptance, not server ingestion.
+// outcome. Consult Receipt: accepted records are durable on the agent, while
+// suppressed records were intentionally not stored. Neither implies server ingestion.
 type Record struct {
 	ID        string          `json:"id"`
 	Timestamp time.Time       `json:"timestamp"`
@@ -44,7 +48,10 @@ func NewRecord(payload any) (Record, error) {
 }
 
 type Receipt struct {
+	// AcceptedIDs identifies records accepted into the durable agent queue.
 	AcceptedIDs []string `json:"acceptedIds"`
+	// SuppressedIDs identifies unchanged readings handled without storage. Do not retry them.
+	SuppressedIDs []string `json:"suppressedIds,omitempty"`
 }
 type ReviewResult struct {
 	Evaluated int `json:"evaluated"`
@@ -75,9 +82,11 @@ type frame struct {
 	Error   *Error          `json:"error,omitempty"`
 }
 type initialization struct {
-	PluginID string          `json:"pluginId"`
-	Release  string          `json:"release"`
-	Config   json.RawMessage `json:"config"`
+	FieldSchemaVersion int             `json:"fieldSchemaVersion,omitempty"`
+	LogVersion         int             `json:"logVersion,omitempty"`
+	PluginID           string          `json:"pluginId"`
+	Release            string          `json:"release"`
+	Config             json.RawMessage `json:"config"`
 }
 type data struct {
 	Stream  string   `json:"stream"`
@@ -85,17 +94,27 @@ type data struct {
 }
 
 type Client struct {
-	PluginID string
-	Release  string
-	writer   io.Writer
-	reader   io.Reader
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	pending  map[string]chan frame
-	sequence atomic.Uint64
-	done     chan struct{}
-	stopOnce sync.Once
-	cancel   context.CancelFunc
+	fieldSchemaVersion int
+	fields             map[string][]FieldDefinition
+	logVersion         int
+	ctx                context.Context
+	actionMu           sync.Mutex
+	actions            map[string]ActionHandler
+	actionsReady       bool
+	activeAction       string
+	actionCancel       context.CancelFunc
+	actionSeen         map[string]time.Time
+	PluginID           string
+	Release            string
+	writer             io.Writer
+	reader             io.Reader
+	writeMu            sync.Mutex
+	mu                 sync.Mutex
+	pending            map[string]chan frame
+	sequence           atomic.Uint64
+	done               chan struct{}
+	stopOnce           sync.Once
+	cancel             context.CancelFunc
 }
 
 // Run waits for the parent handshake, then calls handler with the assigned
@@ -129,7 +148,7 @@ func serve(ctx context.Context, in io.Reader, out io.Writer, handler func(contex
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	c := &Client{PluginID: init.PluginID, Release: init.Release, writer: out, reader: in, pending: make(map[string]chan frame), done: make(chan struct{}), cancel: cancel}
+	c := &Client{fieldSchemaVersion: init.FieldSchemaVersion, logVersion: init.LogVersion, ctx: ctx, PluginID: init.PluginID, Release: init.Release, writer: out, reader: in, pending: make(map[string]chan frame), done: make(chan struct{}), cancel: cancel}
 	defer c.close()
 	go c.read(scanner)
 	go func() {
@@ -163,6 +182,12 @@ func (c *Client) read(scanner *bufio.Scanner) {
 			return
 		}
 		switch f.Method {
+		case "executeAction":
+			c.receiveAction(f)
+			continue
+		case "cancelAction":
+			c.cancelAction(f.ID)
+			continue
 		case "shutdown":
 			return
 		case "ping":
@@ -251,7 +276,6 @@ func (c *Client) call(ctx context.Context, method string, params any, result any
 		return ErrClosed
 	}
 }
-func (c *Client) Ready(ctx context.Context) error { return c.call(ctx, "ready", struct{}{}, nil) }
 func validate(stream string, records []Record) error {
 	if !identifier.MatchString(stream) {
 		return errors.New("stream must be an identifier of 1 to 128 ASCII letters, numbers, dots, underscores or hyphens")
