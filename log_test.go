@@ -18,6 +18,7 @@ func TestLogBeforeReadyRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
 		result <- serve(ctx, childRead, childWrite, func(ctx context.Context, c *Client, _ json.RawMessage) error {
 			receipt, err := c.Log(ctx, LogInfo, "Connected to Modbus", map[string]any{"unitId": 1})
@@ -30,6 +31,7 @@ func TestLogBeforeReadyRoundTrip(t *testing.T) {
 			if err = c.Ready(ctx); err != nil {
 				return err
 			}
+			close(ready)
 			<-ctx.Done()
 			return nil
 		})
@@ -52,6 +54,12 @@ func TestLogBeforeReadyRoundTrip(t *testing.T) {
 		t.Fatalf("log broke readiness: %+v %v", f, err)
 	}
 	encoder.Encode(map[string]any{"version": 1, "id": f.ID, "result": map[string]any{}})
+	// Complete readiness before testing orderly shutdown.
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		t.Fatal("readiness did not complete")
+	}
 	encoder.Encode(map[string]any{"version": 1, "method": "shutdown"})
 	select {
 	case err := <-result:

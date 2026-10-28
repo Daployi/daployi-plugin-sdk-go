@@ -49,7 +49,7 @@ Limits:
 
 - Streams and record IDs: 1–128 ASCII characters, starting with a letter or number; subsequent characters may also be `.`, `_`, `-`.
 - Publish/live batches: 1–100 records, at most 512 KiB serialized data; live requests have a tighter 64 KiB limit.
-- Configuration: JSON object, at most 64 KiB. IPC frames: less than 1 MiB.
+- Configuration: JSON object, at most 64 KiB. IPC frames: less than 16 MiB.
 - Review: exactly one record, JSON object payload, no older than two minutes or more than five seconds ahead. Duplicate/out-of-order observation timestamps do not change alert state.
 - Publish: source timestamps may be historical, but cannot be zero or over five minutes ahead.
 - Queue defaults: 30 days from agent acceptance, 100,000 records, 256 MiB of serialized record bodies. Expired records are discarded; a full unexpired queue rejects new writes with `*plugin.Error{Code: "queue_full"}`. Handle backpressure explicitly. The example logs collection failures and does not provide its own retry buffer.
@@ -221,81 +221,100 @@ The IPC method is `log` with `{id,timestamp,level,message,fields?}`. Its respons
 is `{accepted:true,liveAccepted:false}` (or true). Agent/server event details and
 future viewer requirements are documented in the agent's `docs/plugins.md`.
 
-## Optional agent-side change reporting
+## Agent-side change reporting
 
-Users define tolerance on each plugin field, together with its decoding settings:
+The plugin calls `PublishData` for each successful reading. The agent owns
+change detection and its configuration; optional SDK discovery describes fields but never changes tolerance policy. `Ready` advertises `publishFilterVersion:1`, so suppression
+receipts can be distinguished from durable acceptance.
+
+Configure the device assignment outside the plugin-specific `config`:
 
 ```json
-{"name":"temperature","offset":0,"dataType":"int16","scale":0.1,"tolerance":0.1}
+"publishing": {
+  "defaultTolerance": 0,
+  "streams": {
+    "modbus.process": {
+      "changeOnly": true,
+      "maxSilenceSeconds": 600,
+      "tolerances": {"/registers/0": 100}
+    }
+  }
+}
 ```
 
-The plugin reads this configuration and registers output metadata before Ready:
+Default tolerance applies to numeric payload values. Exact source overrides use
+JSON Pointers relative to the payload; explicit zero overrides a nonzero default.
+Tolerances are finite, nonnegative numbers in original published units, before
+server mappings. Boolean/text/type/structural changes always qualify. Omitted
+policy defaults to change-only, zero tolerance and a 600-second fresh interval.
+Set `changeOnly:false` to preserve every reading, including repeated events.
+
+A difference greater than or equal to a positive tolerance qualifies. Comparison
+uses the last durably accepted full record, so small changes accumulate. Any
+qualifying value queues the whole record and advances all its field baselines.
+IDs and timestamps are excluded; all payload fields participate. Suppressed reads
+before the fresh interval perform no SQLite operations. A failed write does not
+advance the baseline; baselines survive restart. Changes to assignment policy reset
+baselines. Fresh publishing uses an actual incoming successful reading, never a
+synthetic cached value. Older/equal-time readings bypass reduction without moving
+a newer baseline backwards.
+
+`receipt.AcceptedIDs` means stored on the agent, not necessarily delivered.
+`receipt.SuppressedIDs` means handled but deliberately not stored; do not retry
+these as failures. Stable IDs are still required for uncertain transport retries.
+ReviewData, PushLiveData, Log and actions remain independent.
+
+Naming, decoding, scaling and optional display units are managed in Deploy's Field
+Mapping screen. Plugins may supply names, types and units through discovery. No mandatory measurement catalog is required. Arbitrary server
+JavaScript cannot be translated automatically into an agent raw tolerance. Leave
+raw tolerance zero for encoded floating-point, packed-bit or multi-register data
+unless the encoding and desired filtering are understood.
+
+Publish a new SDK release before external builds import these changes. Local
+projects can use a Go workspace referencing this checkout.
+
+## Optional field discovery
+
+A protocol plugin that can browse tags (such as a suitable EtherNet/IP or OPC UA
+client) may register the fields it publishes. Plugins without discovery continue
+publishing arbitrary JSON. Discovery adds nothing to Plugin Settings: Deploy
+creates and displays these entries automatically in **Field Mapping**, with no
+manual Save required for the initial copy mapping.
 
 ```go
-err := client.RegisterFields("modbus.process", plugin.FieldDefinition{
-    Path: "/values/temperature", // Derived from the configured field name.
-    Tolerance: field.Tolerance,
-})
-if err != nil { return err }
+if err := client.RegisterFields(ctx, plugin.DiscoveredField{
+    ID: "probe-1", // Stable protocol identity; do not derive from a display name.
+    Stream: "plant",
+    Path: "/tags/temperature", // JSON Pointer within the published payload.
+    Name: "Probe temperature",
+    Type: "number",
+    Unit: "°C", // Optional.
+    Description: "Temperature reported by the controller", // Optional.
+}); err != nil { return err }
 if err := client.Ready(ctx); err != nil { return err }
 ```
 
-Call RegisterFields once per stream with all of its fields. Paths are JSON
-Pointers relative to the published payload; escape `~` as `~0` and `/` as `~1`
-within property names. Users do not maintain a duplicate path-to-tolerance map.
-The SDK copies and validates definitions and freezes them when Ready is called.
-An unsupported agent returns `unsupported_method`; upgrade the agent before
-running a plugin that registers fields. Up to 128 streams, 256 fields per stream,
-512 bytes per path, and 64 KiB total encoded registration are supported.
+This is a new API contract, separate from the removed tolerance-registration API.
+`RegisterFields(ctx, fields...)` replaces the entire snapshot for this plugin,
+across all its streams. Call sequentially before or after Ready, on startup and
+when definitions change, at most once per second. Calling it without fields
+withdraws all discoveries. Keep IDs stable across label/path changes. No automatic
+protocol browsing is supplied by the SDK; the protocol plugin performs discovery.
 
-Registration does not enable reduction. The client still selects publishing mode
-in the device assignment, alongside plugin-specific `config`:
+Limits: 2,000 fields per plugin (matching the mapping limit), 8 MiB snapshot;
+ID and stream up to 128 identifier characters, JSON Pointer up to 512 bytes, name
+128 bytes, optional unit 64 bytes and description 512 bytes. Supported types:
+number, integer, boolean, string, object, array. Tolerances and executable code are
+not accepted in discovery. Type describes the JSON value actually published; an
+exact 64-bit integer encoded as text must be described as string.
 
-```json
-"publishing": {"streams": {"modbus.process": {"changeOnly": true}}}
-```
+Success means the agent persisted the snapshot locally, not that Deploy has
+received it. The agent forwards native `plugin.fields` messages on its existing
+control WebSocket, replaying after reconnect and periodically. Definitions are not
+attached to every telemetry record. Server mappings apply to records received
+after the definitions; earlier raw records remain available. User edits are kept,
+missing discoveries become unavailable, and user-deleted entries stay dismissed.
+An agent without `fieldDiscoveryVersion:1` returns unsupported_method locally.
 
-Tolerance defaults to zero: identical numeric values are skipped; any change is
-stored. Positive tolerances use published field units **after scaling**, and an
-inclusive boundary (`abs(current - lastStored) >= tolerance`). Strings/booleans
-and structural changes qualify on any change. The entire payload is stored when
-any field qualifies, and all field baselines advance together. Record IDs and
-timestamps are excluded from value comparison; fields inside payload still count,
-including raw arrays or embedded read timestamps. Tolerance applies only to JSON
-numbers, not strings containing digits. Use separate streams for unrelated
-sensors, sequential calls with increasing timestamps, and ordinary unfiltered
-publishing for repeated events or historical imports.
-
-```go
-receipt, err := client.PublishData(ctx, "modbus.process", record)
-if err != nil {
-    // Handle backpressure/transport failure. Reuse IDs on an uncertain retry.
-    return err
-}
-// receipt.AcceptedIDs: durable on the agent, not necessarily delivered.
-// receipt.SuppressedIDs: successfully handled unchanged readings, NOT stored.
-// Do not retry suppressed IDs or treat their absence from AcceptedIDs as failure.
-_ = receipt
-```
-
-Ready advertises `publishFilterVersion:1` and, when fields are registered,
-`fieldSchemaVersion:1` plus the complete field map. SDKs that don't register fields
-remain compatible with older agents. The old assignment `tolerances` map remains
-an agent fallback for unregistered streams; a registered stream overrides it
-entirely, including zero tolerances. New integrations should use field definitions.
-
-Unchanged cached readings perform no SQLite operations. Qualified records and
-baselines share one transaction. Restart restores baselines, and failed writes do
-not advance them. Identical field registration on restart preserves the baseline;
-a changed registration resets it atomically. Baselines expire after the agent
-retention period, when the next actual reading establishes a new anchor; no
-synthetic heartbeat is produced. Out-of-order/equal-time samples bypass reduction
-without moving a newer baseline backwards. Retrying an old batch after a baseline
-advances may retain previously skipped readings; suppression receipts are not a
-durable history. Stable-record-ID queue deduplication still applies to inserted
-records. ReviewData, PushLiveData, Log and actions are independent: the plugin
-still decides which methods to call.
-
-These additions must be released in a new SDK version before external projects
-can fetch them using go get. Local projects can use a Go workspace until then.
-Agent details are in `docs/plugins.md` in the agent repository.
+See `examples/discovery` for a runnable SDK example. Publishing this SDK version
+and rebuilding a plugin is required to use the new method in released binaries.

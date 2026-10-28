@@ -69,20 +69,13 @@ func (c *Client) Ready(ctx context.Context) error {
 	for name := range c.actions {
 		names = append(names, name)
 	}
-	fields := c.fields
-	fieldVersion := 0
-	if len(fields) > 0 {
-		fieldVersion = FieldSchemaVersion
-	}
 	c.actionMu.Unlock()
 	sort.Strings(names)
 	return c.call(ctx, "ready", struct {
-		FieldSchemaVersion   int                          `json:"fieldSchemaVersion,omitempty"`
-		Fields               map[string][]FieldDefinition `json:"fields,omitempty"`
-		PublishFilterVersion int                          `json:"publishFilterVersion"`
-		ActionVersion        int                          `json:"actionVersion"`
-		Actions              []string                     `json:"actions"`
-	}{fieldVersion, fields, PublishFilterVersion, ActionVersion, names}, nil)
+		PublishFilterVersion int      `json:"publishFilterVersion"`
+		ActionVersion        int      `json:"actionVersion"`
+		Actions              []string `json:"actions"`
+	}{PublishFilterVersion, ActionVersion, names}, nil)
 }
 
 func (c *Client) cancelAction(id string) {

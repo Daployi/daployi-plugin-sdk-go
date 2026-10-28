@@ -20,7 +20,9 @@ import (
 )
 
 const ProtocolVersion = 1
-const MaxFrameBytes = 1024 * 1024
+
+// Discovery snapshots can be larger than telemetry; data retains its own byte limit.
+const MaxFrameBytes = 16 * 1024 * 1024
 const MaxRecords = 100
 
 // PublishFilterVersion advertises support for separately acknowledged skipped records.
@@ -82,11 +84,11 @@ type frame struct {
 	Error   *Error          `json:"error,omitempty"`
 }
 type initialization struct {
-	FieldSchemaVersion int             `json:"fieldSchemaVersion,omitempty"`
-	LogVersion         int             `json:"logVersion,omitempty"`
-	PluginID           string          `json:"pluginId"`
-	Release            string          `json:"release"`
-	Config             json.RawMessage `json:"config"`
+	FieldDiscoveryVersion int             `json:"fieldDiscoveryVersion,omitempty"`
+	LogVersion            int             `json:"logVersion,omitempty"`
+	PluginID              string          `json:"pluginId"`
+	Release               string          `json:"release"`
+	Config                json.RawMessage `json:"config"`
 }
 type data struct {
 	Stream  string   `json:"stream"`
@@ -94,27 +96,26 @@ type data struct {
 }
 
 type Client struct {
-	fieldSchemaVersion int
-	fields             map[string][]FieldDefinition
-	logVersion         int
-	ctx                context.Context
-	actionMu           sync.Mutex
-	actions            map[string]ActionHandler
-	actionsReady       bool
-	activeAction       string
-	actionCancel       context.CancelFunc
-	actionSeen         map[string]time.Time
-	PluginID           string
-	Release            string
-	writer             io.Writer
-	reader             io.Reader
-	writeMu            sync.Mutex
-	mu                 sync.Mutex
-	pending            map[string]chan frame
-	sequence           atomic.Uint64
-	done               chan struct{}
-	stopOnce           sync.Once
-	cancel             context.CancelFunc
+	fieldDiscoveryVersion int
+	logVersion            int
+	ctx                   context.Context
+	actionMu              sync.Mutex
+	actions               map[string]ActionHandler
+	actionsReady          bool
+	activeAction          string
+	actionCancel          context.CancelFunc
+	actionSeen            map[string]time.Time
+	PluginID              string
+	Release               string
+	writer                io.Writer
+	reader                io.Reader
+	writeMu               sync.Mutex
+	mu                    sync.Mutex
+	pending               map[string]chan frame
+	sequence              atomic.Uint64
+	done                  chan struct{}
+	stopOnce              sync.Once
+	cancel                context.CancelFunc
 }
 
 // Run waits for the parent handshake, then calls handler with the assigned
@@ -148,7 +149,7 @@ func serve(ctx context.Context, in io.Reader, out io.Writer, handler func(contex
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	c := &Client{fieldSchemaVersion: init.FieldSchemaVersion, logVersion: init.LogVersion, ctx: ctx, PluginID: init.PluginID, Release: init.Release, writer: out, reader: in, pending: make(map[string]chan frame), done: make(chan struct{}), cancel: cancel}
+	c := &Client{fieldDiscoveryVersion: init.FieldDiscoveryVersion, logVersion: init.LogVersion, ctx: ctx, PluginID: init.PluginID, Release: init.Release, writer: out, reader: in, pending: make(map[string]chan frame), done: make(chan struct{}), cancel: cancel}
 	defer c.close()
 	go c.read(scanner)
 	go func() {

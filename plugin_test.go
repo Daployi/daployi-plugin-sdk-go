@@ -15,6 +15,7 @@ func TestAllMethodsAndShutdown(t *testing.T) {
 	defer parentRead.Close()
 	defer parentWrite.Close()
 	result := make(chan error, 1)
+	methodsDone := make(chan struct{})
 	go func() {
 		result <- serve(context.Background(), childRead, childWrite, func(ctx context.Context, c *Client, cfg json.RawMessage) error {
 			if c.PluginID != "test" || string(cfg) != "{}" {
@@ -42,6 +43,7 @@ func TestAllMethodsAndShutdown(t *testing.T) {
 			if err != nil || live.Accepted {
 				return errors.New("offline live should be dropped")
 			}
+			close(methodsDone)
 			<-ctx.Done()
 			return nil
 		})
@@ -58,6 +60,13 @@ func TestAllMethodsAndShutdown(t *testing.T) {
 			t.Fatalf("method %s", f.Method)
 		}
 		if method == "ready" {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(f.Params, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if raw["fields"] != nil || raw["fieldSchemaVersion"] != nil {
+				t.Fatal("ready contains removed field registration")
+			}
 			var capabilities struct {
 				PublishFilterVersion int `json:"publishFilterVersion"`
 			}
@@ -77,6 +86,13 @@ func TestAllMethodsAndShutdown(t *testing.T) {
 			res = LiveResult{false}
 		}
 		enc.Encode(map[string]any{"version": 1, "id": f.ID, "result": res})
+	}
+	select {
+	case <-methodsDone:
+	case err := <-result:
+		t.Fatalf("methods failed: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("methods timed out")
 	}
 	enc.Encode(map[string]any{"version": 1, "method": "shutdown"})
 	select {

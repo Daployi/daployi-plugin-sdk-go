@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	plugin "github.com/Daployi/daployi-plugin-sdk-go"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -42,10 +44,15 @@ func main() {
 				return err
 			}
 		}
-		if config.Mode == "change-reporting" {
-			if err := c.RegisterFields("temperature", plugin.FieldDefinition{Path: "/temperature", Tolerance: 0.1}); err != nil {
-				return err
+		fields := []plugin.DiscoveredField{{ID: "probe-value", Stream: "s", Path: "/temperature", Name: "Temperature", Type: "number"}}
+		if config.Mode == "large-discovery" {
+			fields = make([]plugin.DiscoveredField, 2000)
+			for i := range fields {
+				fields[i] = plugin.DiscoveredField{ID: fmt.Sprintf("tag-%d", i), Stream: "s", Path: "/temperature", Name: fmt.Sprintf("Tag %d", i), Type: "number", Description: strings.Repeat("x", 512)}
 			}
+		}
+		if err := c.RegisterFields(ctx, fields...); err != nil {
+			return err
 		}
 		if err := c.Ready(ctx); err != nil {
 			return err
