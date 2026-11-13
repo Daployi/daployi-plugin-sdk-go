@@ -101,6 +101,7 @@ type Client struct {
 	ctx                   context.Context
 	actionMu              sync.Mutex
 	actions               map[string]ActionHandler
+	actionDefinitions     map[string]ActionDefinition
 	actionsReady          bool
 	activeAction          string
 	actionCancel          context.CancelFunc

@@ -36,7 +36,34 @@ func (f ActionHandlerFunc) ExecuteAction(ctx context.Context, a Action) (any, er
 
 // Action registers an explicitly named handler before Ready. Actions execute
 // serially; a second action is rejected while a handler is still running.
+type ActionDefinition struct {
+	Name         string          `json:"name"`
+	Title        string          `json:"title"`
+	Description  string          `json:"description,omitempty"`
+	ParamsSchema json.RawMessage `json:"paramsSchema,omitempty"`
+}
+
 func (c *Client) Action(name string, handler ActionHandler) error {
+	return c.RegisterAction(ActionDefinition{Name: name, Title: name}, handler)
+}
+
+// RegisterAction advertises the action and its parameter schema to Deploy.
+// The handler must still validate parameters before performing device I/O.
+func (c *Client) RegisterAction(def ActionDefinition, handler ActionHandler) error {
+	name := def.Name
+	if def.Title == "" {
+		def.Title = name
+	}
+	if len(def.Title) > 128 || len(def.Description) > 1024 || len(def.ParamsSchema) > 8192 {
+		return errors.New("action metadata exceeds size limits")
+	}
+	if len(def.ParamsSchema) > 0 {
+		var schema map[string]any
+		if json.Unmarshal(def.ParamsSchema, &schema) != nil || schema["type"] != "object" {
+			return errors.New("action parameters require an object JSON schema")
+		}
+	}
+
 	if !identifier.MatchString(name) || handler == nil {
 		return errors.New("valid action name and handler required")
 	}
@@ -54,7 +81,21 @@ func (c *Client) Action(name string, handler ActionHandler) error {
 	if _, exists := c.actions[name]; exists {
 		return errors.New("action already registered")
 	}
+	candidate := make([]ActionDefinition, 0, len(c.actionDefinitions)+1)
+	for _, existing := range c.actionDefinitions {
+		candidate = append(candidate, existing)
+	}
+	candidate = append(candidate, def)
+	encoded, _ := json.Marshal(candidate)
+	if len(encoded) > 32768 {
+		return errors.New("action definitions exceed 32 KiB")
+	}
 	c.actions[name] = handler
+	if c.actionDefinitions == nil {
+		c.actionDefinitions = map[string]ActionDefinition{}
+	}
+	def.ParamsSchema = append(json.RawMessage(nil), def.ParamsSchema...)
+	c.actionDefinitions[name] = def
 	return nil
 }
 
@@ -69,13 +110,18 @@ func (c *Client) Ready(ctx context.Context) error {
 	for name := range c.actions {
 		names = append(names, name)
 	}
-	c.actionMu.Unlock()
 	sort.Strings(names)
+	definitions := make([]ActionDefinition, 0, len(names))
+	for _, name := range names {
+		definitions = append(definitions, c.actionDefinitions[name])
+	}
+	c.actionMu.Unlock()
 	return c.call(ctx, "ready", struct {
-		PublishFilterVersion int      `json:"publishFilterVersion"`
-		ActionVersion        int      `json:"actionVersion"`
-		Actions              []string `json:"actions"`
-	}{PublishFilterVersion, ActionVersion, names}, nil)
+		PublishFilterVersion int                `json:"publishFilterVersion"`
+		ActionVersion        int                `json:"actionVersion"`
+		Actions              []string           `json:"actions"`
+		ActionDefinitions    []ActionDefinition `json:"actionDefinitions"`
+	}{PublishFilterVersion, ActionVersion, names, definitions}, nil)
 }
 
 func (c *Client) cancelAction(id string) {

@@ -318,3 +318,32 @@ An agent without `fieldDiscoveryVersion:1` returns unsupported_method locally.
 
 See `examples/discovery` for a runnable SDK example. Publishing this SDK version
 and rebuilding a plugin is required to use the new method in released binaries.
+
+
+### Discoverable actions and user allocations
+
+Register action handlers before `Ready`. Existing `Action(name, handler)` calls
+advertise that name automatically. Prefer `RegisterAction` to provide a readable
+title, description and declarative parameter schema:
+
+```go
+err := client.RegisterAction(plugin.ActionDefinition{
+    Name: "setLight",
+    Title: "Set light",
+    Description: "Switch the light on or off.",
+    ParamsSchema: json.RawMessage(`{"type":"object","properties":{"on":{"type":"boolean"}},"required":["on"]}`),
+}, handler)
+```
+
+Schemas describe object parameters using Deploy's configuration-schema subset:
+object/array/string/number/integer/boolean, properties, required, items, enum,
+minimum/maximum, minItems/maxItems, title/description, default and format. No remote
+references or executable validation. The handler must validate parameters and
+configured device address/range restrictions before any I/O. Metadata is limited
+to 32 KiB across the existing maximum of 64 registered actions.
+
+An updated agent advertises registered actions through plugin inventory. Deploy's
+Actions panel lets an Actions Manager enable actions for a device and allocate
+those actions to individual users. Dashboard execution requires device access and
+an explicit allocation, including for administrators. Collection-only plugins
+need not register any actions. The SDK does not receive or manage user grants.

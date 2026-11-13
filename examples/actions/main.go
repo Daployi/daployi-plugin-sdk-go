@@ -34,7 +34,7 @@ func (l *light) ExecuteAction(ctx context.Context, action plugin.Action) (any, e
 func main() {
 	logger := log.New(os.Stderr, "actions: ", log.LstdFlags)
 	err := plugin.Run(context.Background(), func(ctx context.Context, c *plugin.Client, _ json.RawMessage) error {
-		if err := c.Action("setLight", &light{}); err != nil {
+		if err := c.RegisterAction(plugin.ActionDefinition{Name: "setLight", Title: "Set light", Description: "Switch the light on or off.", ParamsSchema: json.RawMessage(`{"type":"object","properties":{"on":{"type":"boolean"}},"required":["on"]}`)}, &light{}); err != nil {
 			return err
 		}
 		if err := c.Ready(ctx); err != nil {
